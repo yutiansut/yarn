@@ -8,6 +8,7 @@ import Lockfile from '../../lockfile';
 import type {Reporter} from '../../reporters/index.js';
 import * as fs from '../../util/fs.js';
 import {Install} from './install.js';
+import {normalizePattern} from '../../util/normalize-pattern.js';
 
 const semver = require('semver');
 const path = require('path');
@@ -39,7 +40,8 @@ export async function verifyTreeCheck(
   // check all dependencies recursively without relying on internal resolver
   const registryName = 'yarn';
   const registry = config.registries[registryName];
-  const rootManifest = await config.readManifest(registry.cwd, registryName);
+  const cwd = config.workspaceRootFolder ? config.lockfileFolder : config.cwd;
+  const rootManifest = await config.readManifest(cwd, registryName);
 
   type PackageToVerify = {
     name: string,
@@ -59,7 +61,7 @@ export async function verifyTreeCheck(
       dependenciesToCheckVersion.push({
         name,
         originalKey: name,
-        parentCwd: registry.cwd,
+        parentCwd: cwd,
         version,
       });
     }
@@ -75,7 +77,7 @@ export async function verifyTreeCheck(
       dependenciesToCheckVersion.push({
         name,
         originalKey: name,
-        parentCwd: registry.cwd,
+        parentCwd: cwd,
         version,
       });
     }
@@ -89,6 +91,11 @@ export async function verifyTreeCheck(
       continue;
     }
     locationsVisited.add(manifestLoc + `@${dep.version}`);
+    // When plugnplay is enabled, packages aren't copied to the node_modules folder, so this check doesn't make sense
+    // TODO: We ideally should check that the packages are located inside the cache instead
+    if (config.plugnplayEnabled) {
+      continue;
+    }
     if (!await fs.exists(manifestLoc)) {
       reportError('packageNotInstalled', `${dep.originalKey}`);
       continue;
@@ -109,19 +116,15 @@ export async function verifyTreeCheck(
       for (const subdep in dependencies) {
         const subDepPath = path.join(manifestLoc, registry.folder, subdep);
         let found = false;
-        const relative = path.relative(registry.cwd, subDepPath);
+        const relative = path.relative(cwd, subDepPath);
         const locations = path.normalize(relative).split(registry.folder + path.sep).filter(dir => !!dir);
         locations.pop();
         while (locations.length >= 0) {
           let possiblePath;
           if (locations.length > 0) {
-            possiblePath = path.join(
-              registry.cwd,
-              registry.folder,
-              locations.join(path.sep + registry.folder + path.sep),
-            );
+            possiblePath = path.join(cwd, registry.folder, locations.join(path.sep + registry.folder + path.sep));
           } else {
-            possiblePath = registry.cwd;
+            possiblePath = cwd;
           }
           if (await fs.exists(path.join(possiblePath, registry.folder, subdep))) {
             dependenciesToCheckVersion.push({
@@ -199,7 +202,6 @@ export async function run(config: Config, reporter: Reporter, flags: Object, arg
     return;
   }
 
-  const mainPackageJson = await config.readJson(path.join(config.cwd, 'package.json'));
   const lockfile = await Lockfile.fromDirectory(config.cwd);
   const install = new Install(flags, config, reporter, lockfile);
 
@@ -237,7 +239,7 @@ export async function run(config: Config, reporter: Reporter, flags: Object, arg
 
   const bundledDeps = {};
   // check if any of the node_modules are out of sync
-  const res = await install.linker.getFlatHoistedTree(patterns);
+  const res = await install.linker.getFlatHoistedTree(patterns, workspaceLayout);
   for (const [loc, {originalKey, pkg, ignore}] of res) {
     if (ignore) {
       continue;
@@ -338,9 +340,10 @@ export async function run(config: Config, reporter: Reporter, flags: Object, arg
           const foundHuman = `${humaniseLocation(path.dirname(depPkgLoc)).join('#')}@${depPkg.version}`;
           if (!semver.satisfies(depPkg.version, range, config.looseSemver)) {
             // module isn't correct semver
-            const resRange = mainPackageJson.resolutions && mainPackageJson.resolutions[name];
-            if (resRange) {
-              const resHuman = `${human}#${name}@${resRange}`;
+            const resPattern = install.resolutionMap.find(name, originalKey.split('#'));
+            if (resPattern) {
+              const resHuman = `${human}#${resPattern}`;
+              const {range: resRange} = normalizePattern(resPattern);
 
               if (semver.satisfies(depPkg.version, resRange, config.looseSemver)) {
                 reporter.warn(reporter.lang('incompatibleResolutionVersion', foundHuman, subHuman));

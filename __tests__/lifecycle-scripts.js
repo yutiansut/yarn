@@ -1,5 +1,7 @@
 /* @flow */
 
+import {existsSync} from 'fs';
+
 import NoopReporter from '../src/reporters/base-reporter.js';
 import makeTemp from './_temp';
 import * as fs from '../src/util/fs.js';
@@ -11,6 +13,10 @@ const fixturesLoc = path.join(__dirname, './fixtures/lifecycle-scripts');
 const yarnBin = path.join(__dirname, '../bin/yarn.js');
 
 jasmine.DEFAULT_TIMEOUT_INTERVAL = 60000;
+
+if (!existsSync(path.resolve(__dirname, '../lib'))) {
+  throw new Error('These tests require `yarn build` to have been run first.');
+}
 
 async function execCommand(cmd: string, packageName: string, env = process.env): Promise<string> {
   const srcPackageDir = path.join(fixturesLoc, packageName);
@@ -42,31 +48,31 @@ async function execCommand(cmd: string, packageName: string, env = process.env):
 
 test.concurrent('should add the global yarnrc arguments to the command line', async () => {
   const stdout = await execCommand('cache dir', 'yarnrc-cli');
-  expect(stdout.replace(/\\/g, '/')).toMatch(/^(C:)?\/tmp\/foobar\/v[0-9]+\n$/);
+  expect(stdout.replace(/\\/g, '/')).toMatch(/^(C:)?\/tmp\/foobar\/v[0-9]+(\/.*)?\n$/);
 });
 
 test.concurrent(
   'should add the command-specific yarnrc arguments to the command line if the command name matches',
   async () => {
     const stdout = await execCommand('cache dir', 'yarnrc-cli-command-specific-ok');
-    expect(stdout.replace(/\\/g, '/')).toMatch(/^(C:)?\/tmp\/foobar\/v[0-9]+\n$/);
+    expect(stdout.replace(/\\/g, '/')).toMatch(/^(C:)?\/tmp\/foobar\/v[0-9]+(\/.*)?\n$/);
   },
 );
 
 test.concurrent("should not add the command-specific yarnrc arguments if the command name doesn't match", async () => {
   const stdout = await execCommand('cache dir', 'yarnrc-cli-command-specific-ko');
-  expect(stdout.replace(/\\/g, '/')).not.toMatch(/^(C:)?\/tmp\/foobar\/v[0-9]+\n$/);
+  expect(stdout.replace(/\\/g, '/')).not.toMatch(/^(C:)?\/tmp\/foobar\/v[0-9]+(\/.*)?\n$/);
 });
 
 test.concurrent('should allow overriding the yarnrc values from the command line', async () => {
   const stdout = await execCommand('cache dir --cache-folder /tmp/toto', 'yarnrc-cli');
-  expect(stdout.replace(/\\/g, '/')).toMatch(/^(C:)?\/tmp\/toto\/v[0-9]+\n$/);
+  expect(stdout.replace(/\\/g, '/')).toMatch(/^(C:)?\/tmp\/toto\/v[0-9]+(\/.*)?\n$/);
 });
 
 // Test disabled for now, cf rc.js
 test.concurrent('should resolve the yarnrc values relative to where the file lives', async () => {
   const stdout = await execCommand('cache dir', 'yarnrc-cli-relative');
-  expect(stdout.replace(/\\/g, '/')).toMatch(/^(C:)?(\/[^\/]+)+\/foobar\/hello\/world\/v[0-9]+\n$/);
+  expect(stdout.replace(/\\/g, '/')).toMatch(/^(C:)?(\/[^\/]+)+\/foobar\/hello\/world\/v[0-9]+(\/.*)?\n$/);
 });
 
 test.concurrent(

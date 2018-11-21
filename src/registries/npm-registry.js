@@ -15,6 +15,8 @@ import {addSuffix} from '../util/misc';
 import {getPosixPath, resolveWithHome} from '../util/path';
 import normalizeUrl from 'normalize-url';
 import {default as userHome, home} from '../util/user-home-dir';
+import {MessageError, OneTimePasswordError} from '../errors.js';
+import {getOneTimePassword} from '../cli/commands/login.js';
 import path from 'path';
 import url from 'url';
 import ini from 'ini';
@@ -86,8 +88,15 @@ function urlParts(requestUrl: string): UrlParts {
 }
 
 export default class NpmRegistry extends Registry {
-  constructor(cwd: string, registries: ConfigRegistries, requestManager: RequestManager, reporter: Reporter) {
-    super(cwd, registries, requestManager, reporter);
+  constructor(
+    cwd: string,
+    registries: ConfigRegistries,
+    requestManager: RequestManager,
+    reporter: Reporter,
+    enableDefaultRc: boolean,
+    extraneousRcFiles: Array<string>,
+  ) {
+    super(cwd, registries, requestManager, reporter, enableDefaultRc, extraneousRcFiles);
     this.folder = 'node_modules';
   }
 
@@ -126,7 +135,7 @@ export default class NpmRegistry extends Registry {
     return (requestToRegistryHost || requestToYarn) && (requestToRegistryPath || customHostSuffixInUse);
   }
 
-  request(pathname: string, opts?: RegistryRequestOptions = {}, packageName: ?string): Promise<*> {
+  async request(pathname: string, opts?: RegistryRequestOptions = {}, packageName: ?string): Promise<*> {
     // packageName needs to be escaped when if it is passed
     const packageIdent = (packageName && NpmRegistry.escapeName(packageName)) || pathname;
     const registry = opts.registry || this.getRegistry(packageIdent);
@@ -134,12 +143,15 @@ export default class NpmRegistry extends Registry {
 
     const alwaysAuth = this.getRegistryOrGlobalOption(registry, 'always-auth');
 
-    const headers = Object.assign(
-      {
-        Accept: 'application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8, */*',
-      },
-      opts.headers,
-    );
+    const headers = {
+      Accept:
+        // This is to use less bandwidth unless we really need to get the full response.
+        // See https://github.com/npm/npm-registry-client#requests
+        opts.unfiltered
+          ? 'application/json'
+          : 'application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8, */*',
+      ...opts.headers,
+    };
 
     const isToRegistry = this.isRequestToRegistry(requestUrl, registry) || this.requestNeedsAuth(requestUrl);
 
@@ -151,17 +163,38 @@ export default class NpmRegistry extends Registry {
       }
     }
 
-    return this.requestManager.request({
-      url: requestUrl,
-      method: opts.method,
-      body: opts.body,
-      auth: opts.auth,
-      headers,
-      json: !opts.buffer,
-      buffer: opts.buffer,
-      process: opts.process,
-      gzip: true,
-    });
+    if (this.otp) {
+      headers['npm-otp'] = this.otp;
+    }
+
+    try {
+      return await this.requestManager.request({
+        url: requestUrl,
+        method: opts.method,
+        body: opts.body,
+        auth: opts.auth,
+        headers,
+        json: !opts.buffer,
+        buffer: opts.buffer,
+        process: opts.process,
+        gzip: true,
+      });
+    } catch (error) {
+      if (error instanceof OneTimePasswordError) {
+        if (this.otp) {
+          throw new MessageError(this.reporter.lang('incorrectOneTimePassword'));
+        }
+
+        this.reporter.info(this.reporter.lang('twoFactorAuthenticationEnabled'));
+        this.otp = await getOneTimePassword(this.reporter);
+
+        this.requestManager.clearCache();
+
+        return this.request(pathname, opts, packageName);
+      } else {
+        throw error;
+      }
+    }
   }
 
   requestNeedsAuth(requestUrl: string): boolean {
@@ -169,7 +202,7 @@ export default class NpmRegistry extends Registry {
     const requestParts = urlParts(requestUrl);
     return !!Object.keys(config).find(option => {
       const parts = option.split(':');
-      if (parts.length === 2 && parts[1] === '_authToken') {
+      if ((parts.length === 2 && parts[1] === '_authToken') || parts[1] === '_password') {
         const registryParts = urlParts(parts[0]);
         if (requestParts.host === registryParts.host && requestParts.path.startsWith(registryParts.path)) {
           return true;
@@ -180,16 +213,15 @@ export default class NpmRegistry extends Registry {
   }
 
   async checkOutdated(config: Config, name: string, range: string): CheckOutdatedReturn {
-    const req = await this.request(NpmRegistry.escapeName(name), {
-      headers: {Accept: 'application/json'},
-    });
+    const escapedName = NpmRegistry.escapeName(name);
+    const req = await this.request(escapedName, {unfiltered: true});
     if (!req) {
       throw new Error('couldnt find ' + name);
     }
 
     // By default use top level 'repository' and 'homepage' values
     let {repository, homepage} = req;
-    const wantedPkg = await NpmResolver.findVersionInRegistryResponse(config, range, req);
+    const wantedPkg = await NpmResolver.findVersionInRegistryResponse(config, escapedName, range, req);
 
     // But some local repositories like Verdaccio do not return 'repository' nor 'homepage'
     // in top level data structure, so we fallback to wanted package manifest
@@ -198,35 +230,49 @@ export default class NpmRegistry extends Registry {
       homepage = wantedPkg.homepage;
     }
 
+    let latest = req['dist-tags'].latest;
+    // In certain cases, registries do not return a 'latest' tag.
+    if (!latest) {
+      latest = wantedPkg.version;
+    }
+
     const url = homepage || (repository && repository.url) || '';
 
     return {
-      latest: req['dist-tags'].latest,
+      latest,
       wanted: wantedPkg.version,
       url,
     };
   }
 
   async getPossibleConfigLocations(filename: string, reporter: Reporter): Promise<Array<[boolean, string, string]>> {
-    // npmrc --> ./.npmrc, ~/.npmrc, ${prefix}/etc/npmrc
-    const localfile = '.' + filename;
-    const possibles = [
-      [false, path.join(this.cwd, localfile)],
-      [true, this.config.userconfig || path.join(userHome, localfile)],
-      [false, path.join(getGlobalPrefix(), 'etc', filename)],
-    ];
+    let possibles = [];
 
-    // When home directory for global install is different from where $HOME/npmrc is stored,
-    // E.g. /usr/local/share vs /root on linux machines, check the additional location
-    if (home !== userHome) {
-      possibles.push([true, path.join(home, localfile)]);
+    for (const rcFile of this.extraneousRcFiles.slice().reverse()) {
+      possibles.push([false, path.resolve(process.cwd(), rcFile)]);
     }
 
-    // npmrc --> ../.npmrc, ../../.npmrc, etc.
-    const foldersFromRootToCwd = getPosixPath(this.cwd).split('/');
-    while (foldersFromRootToCwd.length > 1) {
-      possibles.push([false, path.join(foldersFromRootToCwd.join(path.sep), localfile)]);
-      foldersFromRootToCwd.pop();
+    if (this.enableDefaultRc) {
+      // npmrc --> ./.npmrc, ~/.npmrc, ${prefix}/etc/npmrc
+      const localfile = '.' + filename;
+      possibles = possibles.concat([
+        [false, path.join(this.cwd, localfile)],
+        [true, this.config.userconfig || path.join(userHome, localfile)],
+        [false, path.join(getGlobalPrefix(), 'etc', filename)],
+      ]);
+
+      // When home directory for global install is different from where $HOME/npmrc is stored,
+      // E.g. /usr/local/share vs /root on linux machines, check the additional location
+      if (home !== userHome) {
+        possibles.push([true, path.join(home, localfile)]);
+      }
+
+      // npmrc --> ../.npmrc, ../../.npmrc, etc.
+      const foldersFromRootToCwd = getPosixPath(this.cwd).split('/');
+      while (foldersFromRootToCwd.length > 1) {
+        possibles.push([false, path.join(foldersFromRootToCwd.join(path.sep), localfile)]);
+        foldersFromRootToCwd.pop();
+      }
     }
 
     const actuals = [];
@@ -237,6 +283,7 @@ export default class NpmRegistry extends Registry {
         actuals.push([isHome, loc, await fs.readFile(loc)]);
       }
     }
+
     return actuals;
   }
 
@@ -307,6 +354,30 @@ export default class NpmRegistry extends Registry {
     return DEFAULT_REGISTRY;
   }
 
+  getAuthByRegistry(registry: string): string {
+    // Check for bearer token.
+    const authToken = this.getRegistryOrGlobalOption(registry, '_authToken');
+    if (authToken) {
+      return `Bearer ${String(authToken)}`;
+    }
+
+    // Check for basic auth token.
+    const auth = this.getRegistryOrGlobalOption(registry, '_auth');
+    if (auth) {
+      return `Basic ${String(auth)}`;
+    }
+
+    // Check for basic username/password auth.
+    const username = this.getRegistryOrGlobalOption(registry, 'username');
+    const password = this.getRegistryOrGlobalOption(registry, '_password');
+    if (username && password) {
+      const pw = Buffer.from(String(password), 'base64').toString();
+      return 'Basic ' + Buffer.from(String(username) + ':' + pw).toString('base64');
+    }
+
+    return '';
+  }
+
   getAuth(packageIdent: string): string {
     if (this.token) {
       return this.token;
@@ -321,24 +392,10 @@ export default class NpmRegistry extends Registry {
     }
 
     for (const registry of registries) {
-      // Check for bearer token.
-      const authToken = this.getRegistryOrGlobalOption(registry, '_authToken');
-      if (authToken) {
-        return `Bearer ${String(authToken)}`;
-      }
+      const auth = this.getAuthByRegistry(registry);
 
-      // Check for basic auth token.
-      const auth = this.getRegistryOrGlobalOption(registry, '_auth');
       if (auth) {
-        return `Basic ${String(auth)}`;
-      }
-
-      // Check for basic username/password auth.
-      const username = this.getRegistryOrGlobalOption(registry, 'username');
-      const password = this.getRegistryOrGlobalOption(registry, '_password');
-      if (username && password) {
-        const pw = new Buffer(String(password), 'base64').toString();
-        return 'Basic ' + new Buffer(String(username) + ':' + pw).toString('base64');
+        return auth;
       }
     }
 

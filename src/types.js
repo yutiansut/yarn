@@ -41,7 +41,9 @@ export type PackageRemote = {
   reference: string,
   resolved?: ?string,
   hash: ?string,
+  integrity?: ?string,
   packageName?: string,
+  registryRemote?: ?PackageRemote,
 };
 
 // `dependencies` field in package info
@@ -96,6 +98,7 @@ export type Manifest = {
   _uid: string,
 
   _remote?: ?PackageRemote,
+  _resolved?: string,
 
   dist?: {
     tarball: string,
@@ -131,6 +134,10 @@ export type Manifest = {
 
   bundleDependencies?: Array<string>,
   bundledDependencies?: Array<string>,
+
+  installConfig?: {
+    pnp?: boolean,
+  },
 
   deprecated?: string,
   files?: Array<string>,

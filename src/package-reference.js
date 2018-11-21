@@ -17,6 +17,8 @@ export default class PackageReference {
     this.config = request.config;
     this.hint = request.hint;
 
+    this.isPlugnplay = false;
+
     this.registry = remote.registry;
     this.version = info.version;
     this.name = info.name;
@@ -33,7 +35,7 @@ export default class PackageReference {
     this.ignore = false;
     this.incompatible = false;
     this.fresh = false;
-    this.location = null;
+    this.locations = [];
     this.addRequest(request);
   }
 
@@ -41,6 +43,7 @@ export default class PackageReference {
   lockfile: Lockfile;
   config: Config;
 
+  isPlugnplay: boolean;
   level: number;
   name: string;
   version: string;
@@ -55,15 +58,17 @@ export default class PackageReference {
   permissions: {[key: string]: boolean};
   remote: PackageRemote;
   registry: RegistryNames;
-  location: ?string;
+  locations: Array<string>;
   resolver: PackageResolver;
 
   setFresh(fresh: boolean) {
     this.fresh = fresh;
   }
 
-  setLocation(loc: string): string {
-    return (this.location = loc);
+  addLocation(loc: string) {
+    if (this.locations.indexOf(loc) === -1) {
+      this.locations.push(loc);
+    }
   }
 
   addRequest(request: PackageRequest) {

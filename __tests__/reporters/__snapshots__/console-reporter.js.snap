@@ -7,6 +7,14 @@ Object {
 }
 `;
 
+exports[`ConsoleReporter.auditSummary 1`] = `
+Object {
+  "stderr": "",
+  "stdout": "[2K[1G[31m1[39m vulnerabilities found - Packages audited: 5
+[2K[1GSeverity: 1 High",
+}
+`;
+
 exports[`ConsoleReporter.command 1`] = `
 Object {
   "stderr": "",
@@ -53,6 +61,13 @@ exports[`ConsoleReporter.log 1`] = `
 Object {
   "stderr": "",
   "stdout": "[2K[1Gfoobar",
+}
+`;
+
+exports[`ConsoleReporter.log is silent when isSilent is true 1`] = `
+Object {
+  "stderr": "",
+  "stdout": "",
 }
 `;
 
@@ -122,6 +137,13 @@ Object {
 └─ dep3
    ├─ dep3.1
    └─ dep3.2",
+}
+`;
+
+exports[`ConsoleReporter.tree is silent when isSilent is true 1`] = `
+Object {
+  "stderr": "",
+  "stdout": "",
 }
 `;
 

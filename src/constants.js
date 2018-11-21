@@ -11,23 +11,24 @@ type Env = {
 };
 
 export const DEPENDENCY_TYPES = ['devDependencies', 'dependencies', 'optionalDependencies', 'peerDependencies'];
+export const OWNED_DEPENDENCY_TYPES = ['devDependencies', 'dependencies', 'optionalDependencies'];
+
 export const RESOLUTIONS = 'resolutions';
 export const MANIFEST_FIELDS = [RESOLUTIONS, ...DEPENDENCY_TYPES];
 
 export const SUPPORTED_NODE_VERSIONS = '^4.8.0 || ^5.7.0 || ^6.2.2 || >=8.0.0';
 
 export const YARN_REGISTRY = 'https://registry.yarnpkg.com';
+export const NPM_REGISTRY_RE = /https?:\/\/registry\.npmjs\.org/g;
 
 export const YARN_DOCS = 'https://yarnpkg.com/en/docs/cli/';
 export const YARN_INSTALLER_SH = 'https://yarnpkg.com/install.sh';
 export const YARN_INSTALLER_MSI = 'https://yarnpkg.com/latest.msi';
 
 export const SELF_UPDATE_VERSION_URL = 'https://yarnpkg.com/latest-version';
-export const SELF_UPDATE_TARBALL_URL = 'https://yarnpkg.com/latest.tar.gz';
-export const SELF_UPDATE_DOWNLOAD_FOLDER = 'updates';
 
 // cache version, bump whenever we make backwards incompatible changes
-export const CACHE_VERSION = 1;
+export const CACHE_VERSION = 4;
 
 // lockfile version, bump whenever we make backwards incompatible changes
 export const LOCKFILE_VERSION = 1;
@@ -77,6 +78,8 @@ function getYarnBinPath(): string {
 export const NODE_MODULES_FOLDER = 'node_modules';
 export const NODE_PACKAGE_JSON = 'package.json';
 
+export const PNP_FILENAME = '.pnp.js';
+
 export const POSIX_GLOBAL_PREFIX = `${process.env.DESTDIR || ''}/usr/local`;
 export const FALLBACK_GLOBAL_PREFIX = path.join(userHome, '.yarn');
 
@@ -86,7 +89,9 @@ export const LOCKFILE_FILENAME = 'yarn.lock';
 export const METADATA_FILENAME = '.yarn-metadata.json';
 export const TARBALL_FILENAME = '.yarn-tarball.tgz';
 export const CLEAN_FILENAME = '.yarnclean';
-export const ACCESS_FILENAME = '.yarn-access';
+
+export const NPM_LOCK_FILENAME = 'package-lock.json';
+export const NPM_SHRINKWRAP_FILENAME = 'npm-shrinkwrap.json';
 
 export const DEFAULT_INDENT = '  ';
 export const SINGLE_INSTANCE_PORT = 31997;

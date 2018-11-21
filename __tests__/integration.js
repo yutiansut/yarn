@@ -2,6 +2,7 @@
 /* eslint max-len: 0 */
 
 import http from 'http';
+import {existsSync} from 'fs';
 
 import invariant from 'invariant';
 import execa from 'execa';
@@ -15,6 +16,10 @@ import en from '../src/reporters/lang/en.js';
 jasmine.DEFAULT_TIMEOUT_INTERVAL = 120000;
 
 const path = require('path');
+
+if (!existsSync(path.resolve(__dirname, '../lib'))) {
+  throw new Error('These tests require `yarn build` to have been run first.');
+}
 
 function addTest(pattern, {strictPeers} = {strictPeers: false}, yarnArgs: Array<string> = []) {
   test.concurrent(`yarn add ${pattern}`, async () => {
@@ -61,10 +66,13 @@ function addTest(pattern, {strictPeers} = {strictPeers: false}, yarnArgs: Array<
 
 addTest('scrollin'); // npm
 addTest('https://git@github.com/stevemao/left-pad.git'); // git url, with username
-addTest('https://github.com/yarnpkg/yarn/releases/download/v0.18.1/yarn-v0.18.1.tar.gz'); // tarball
 addTest('https://github.com/bestander/chrome-app-livereload.git'); // no package.json
 addTest('bestander/chrome-app-livereload'); // no package.json, github, tarball
-addTest('react-scripts@1.0.13', {strictPeers: true}, ['--no-node-version-check', '--ignore-engines']); // many peer dependencies, there shouldn't be any peerDep warnings
+
+if (process.platform !== 'win32') {
+  addTest('https://github.com/yarnpkg/yarn/releases/download/v0.18.1/yarn-v0.18.1.tar.gz'); // tarball
+  addTest('react-scripts@1.0.13', {strictPeers: true}, ['--no-node-version-check', '--ignore-engines']); // many peer dependencies, there shouldn't be any peerDep warnings
+}
 
 const MIN_PORT_NUM = 56000;
 const MAX_PORT_NUM = 65535;
@@ -203,7 +211,7 @@ describe('--registry option', () => {
     const lockfile = explodeLockfile(await fs.readFile(path.join(cwd, 'yarn.lock')));
 
     expect(packageJson.dependencies['left-pad']).toBeDefined();
-    expect(lockfile).toHaveLength(3);
+    expect(lockfile).toHaveLength(4);
     expect(lockfile[2]).toContain(registry);
   });
 
@@ -220,7 +228,7 @@ describe('--registry option', () => {
     const lockfile = explodeLockfile(await fs.readFile(path.join(cwd, 'yarn.lock')));
 
     expect(packageJson.dependencies['is-array']).toBeDefined();
-    expect(lockfile).toHaveLength(3);
+    expect(lockfile).toHaveLength(4);
     expect(lockfile[2]).toContain(registry);
   });
 
@@ -251,7 +259,7 @@ describe('--registry option', () => {
     const lockfile = explodeLockfile(await fs.readFile(path.join(cwd, 'yarn.lock')));
 
     expect(packageJson.dependencies['left-pad']).toBeDefined();
-    expect(lockfile).toHaveLength(3);
+    expect(lockfile).toHaveLength(4);
     expect(lockfile[2]).toContain(registry);
   });
 });
@@ -269,6 +277,26 @@ test('--cwd option', async () => {
 
   const packageJson = JSON.parse(await fs.readFile(packageJsonPath));
   expect(packageJson.dependencies['left-pad']).toBeDefined();
+});
+
+const customCacheCwd = `${__dirname}/fixtures/cache/custom-location`;
+
+test('default rc', async (): Promise<void> => {
+  const [stdoutOutput] = await runYarn(['cache', 'dir'], {cwd: customCacheCwd});
+
+  expect(stdoutOutput).toMatch(/uses-default-yarnrc/);
+});
+
+test('--no-default-rc', async (): Promise<void> => {
+  const [stdoutOutput] = await runYarn(['cache', 'dir', '--no-default-rc'], {cwd: customCacheCwd});
+
+  expect(stdoutOutput).not.toMatch(/uses-default-yarnrc/);
+});
+
+test('--use-yarnrc', async (): Promise<void> => {
+  const [stdoutOutput] = await runYarn(['cache', 'dir', '--use-yarnrc', './custom-yarnrc'], {cwd: customCacheCwd});
+
+  expect(stdoutOutput).toMatch(/uses-custom-yarnrc/);
 });
 
 test('yarnrc arguments', async () => {
@@ -398,6 +426,30 @@ test('yarn run <script> <strings that need escaping>', async () => {
   expect(stdout.toString().trim()).toEqual(JSON.stringify(trickyStrings));
 });
 
+test('yarn run <failing script>', async () => {
+  const cwd = await makeTemp();
+
+  await fs.writeFile(
+    path.join(cwd, 'package.json'),
+    JSON.stringify({
+      license: 'MIT',
+      scripts: {false: 'exit 1'},
+    }),
+  );
+
+  let stderr = null;
+  let err = null;
+  try {
+    await runYarn(['run', 'false'], {cwd});
+  } catch (e) {
+    stderr = e.stderr.trim();
+    err = e.code;
+  }
+
+  expect(err).toEqual(1);
+  expect(stderr).toEqual('error Command failed with exit code 1.');
+});
+
 test('yarn run in path need escaping', async () => {
   const cwd = await makeTemp('special (chars)');
 
@@ -442,6 +494,20 @@ test('cache folder fallback', async () => {
     path.join(constants.PREFERRED_MODULE_CACHE_DIRECTORIES[0], `v${constants.CACHE_VERSION}`),
   );
   expect(stderrOutput2.toString()).toMatch(/Skipping preferred cache folder/);
+});
+
+test('relative cache folder', async () => {
+  const base = await makeTemp();
+
+  await fs.writeFile(`${base}/.yarnrc`, 'cache-folder "./foo"\n');
+
+  await fs.mkdirp(`${base}/sub`);
+  await fs.mkdirp(`${base}/foo`);
+
+  const [stdoutOutput, _] = await runYarn(['cache', 'dir'], {cwd: `${base}/sub`});
+
+  // The dirname is to remove the "v2" part
+  expect(await fs.realpath(path.dirname(stdoutOutput.toString()))).toEqual(await fs.realpath(`${base}/foo`));
 });
 
 test('yarn create', async () => {

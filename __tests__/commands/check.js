@@ -33,6 +33,16 @@ test.concurrent('--verify-tree should report wrong version', async (): Promise<v
   expect(thrown).toEqual(true);
 });
 
+test.concurrent('--verify-tree should work from a workspace cwd', async (): Promise<void> => {
+  let thrown = false;
+  try {
+    await runCheck([], {verifyTree: true}, {source: 'verify-tree-workspace-cwd', cwd: '/packages/workspace-1'});
+  } catch (e) {
+    thrown = true;
+  }
+  expect(thrown).toEqual(false);
+});
+
 test.concurrent('--verify-tree should report missing dependency', async (): Promise<void> => {
   let thrown = false;
   try {
@@ -373,11 +383,53 @@ test.concurrent('should ignore bundled dependencies', async (): Promise<void> =>
   );
 });
 
-test.concurrent('should warn about mismatched dependencies if they match resolutions', async (): Promise<void> => {
+test.concurrent('should warn about mismatched dependencies if they match resolutions (simple)', async (): Promise<
+  void,
+> => {
   let mismatchError = false;
   let stdout = '';
   try {
     await runCheck([], {}, 'resolutions', (config, reporter, check, getStdout) => {
+      stdout = getStdout();
+    });
+  } catch (err) {
+    mismatchError = true;
+  }
+  expect(mismatchError).toEqual(false);
+  expect(
+    stdout.search(
+      `warning.*"repeat-string@1.4.0" is incompatible with requested version "pad-left#repeat-string@\\^1.5.4"`,
+    ),
+  ).toBeGreaterThan(-1);
+});
+
+test.concurrent('should warn about mismatched dependencies if they match resolutions (tree)', async (): Promise<
+  void,
+> => {
+  let mismatchError = false;
+  let stdout = '';
+  try {
+    await runCheck([], {}, 'resolutions-tree', (config, reporter, check, getStdout) => {
+      stdout = getStdout();
+    });
+  } catch (err) {
+    mismatchError = true;
+  }
+  expect(mismatchError).toEqual(false);
+  expect(
+    stdout.search(
+      `warning.*"repeat-string@1.4.0" is incompatible with requested version "pad-left#repeat-string@\\^1.5.4"`,
+    ),
+  ).toBeGreaterThan(-1);
+});
+
+test.concurrent('should warn about mismatched dependencies if they match resolutions (glob)', async (): Promise<
+  void,
+> => {
+  let mismatchError = false;
+  let stdout = '';
+  try {
+    await runCheck([], {}, 'resolutions-glob', (config, reporter, check, getStdout) => {
       stdout = getStdout();
     });
   } catch (err) {

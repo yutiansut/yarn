@@ -8,6 +8,7 @@ const getDocsInfo = name => 'Visit ' + chalk.bold(getDocsLink(name)) + ' for doc
 
 import * as access from './access.js';
 import * as add from './add.js';
+import * as audit from './audit.js';
 import * as autoclean from './autoclean.js';
 import * as bin from './bin.js';
 import * as cache from './cache.js';
@@ -31,11 +32,13 @@ import * as node from './node.js';
 import * as outdated from './outdated.js';
 import * as owner from './owner.js';
 import * as pack from './pack.js';
+import * as policies from './policies.js';
 import * as publish from './publish.js';
 import * as remove from './remove.js';
 import * as run from './run.js';
 import * as tag from './tag.js';
 import * as team from './team.js';
+import * as unplug from './unplug.js';
 import * as unlink from './unlink.js';
 import * as upgrade from './upgrade.js';
 import * as version from './version.js';
@@ -50,6 +53,7 @@ import buildUseless from './_useless.js';
 const commands = {
   access,
   add,
+  audit,
   autoclean,
   bin,
   cache,
@@ -75,12 +79,14 @@ const commands = {
   outdated,
   owner,
   pack,
+  policies,
   prune: buildUseless("The prune command isn't necessary. `yarn install` will prune extraneous packages."),
   publish,
   remove,
   run,
   tag,
   team,
+  unplug,
   unlink,
   upgrade,
   version,

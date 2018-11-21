@@ -14,6 +14,8 @@ import type {
 } from './types.js';
 import type {LanguageKeys} from './lang/en.js';
 import type {Formatter} from './format.js';
+import type {AuditMetadata, AuditActionRecommendation, AuditAdvisory, AuditResolution} from '../cli/commands/audit';
+
 import {defaultFormatter} from './format.js';
 import * as languages from './lang/index.js';
 import isCI from 'is-ci';
@@ -46,7 +48,13 @@ export function stringifyLangArgs(args: Array<any>): Array<string> {
         // should match all literal line breaks and
         // "u001b" that follow an odd number of backslashes and convert them to ESC
         // we do this because the JSON.stringify process has escaped these characters
-        return str.replace(/((?:^|[^\\])(?:\\{2})*)\\u001[bB]/g, '$1\u001b').replace(/[\\]r[\\]n|[\\]n/g, os.EOL);
+        return str
+          .replace(/((?:^|[^\\])(?:\\{2})*)\\u001[bB]/g, '$1\u001b')
+          .replace(/[\\]r[\\]n|([\\])?[\\]n/g, (match, precededBacklash) => {
+            // precededBacklash not null when "\n" is preceded by a backlash ("\\n")
+            // match will be "\\n" and we don't replace it with os.EOL
+            return precededBacklash ? match : os.EOL;
+          });
       } catch (e) {
         return util.inspect(val);
       }
@@ -183,7 +191,7 @@ export default class BaseReporter {
   list(key: string, items: Array<string>, hints?: Object) {}
 
   // Outputs basic tree structure to console
-  tree(key: string, obj: Trees) {}
+  tree(key: string, obj: Trees, {force = false}: {force?: boolean} = {}) {}
 
   // called whenever we begin a step in the CLI.
   step(current: number, total: number, message: string, emoji?: string) {}
@@ -217,8 +225,20 @@ export default class BaseReporter {
   // the screen shown at the very end of the CLI
   footer(showPeakMemory: boolean) {}
 
-  //
+  // a table structure
   table(head: Array<string>, body: Array<Array<string>>) {}
+
+  // security audit action to resolve advisories
+  auditAction(recommendation: AuditActionRecommendation) {}
+
+  // security audit requires manual review
+  auditManualReview() {}
+
+  // security audit advisory
+  auditAdvisory(resolution: AuditResolution, auditAdvisory: AuditAdvisory) {}
+
+  // summary for security audit report
+  auditSummary(auditMetadata: AuditMetadata) {}
 
   // render an activity spinner and return a function that will trigger an update
   activity(): ReporterSpinner {

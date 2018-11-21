@@ -266,3 +266,63 @@ test('close', async () => {
     }),
   ).toMatchSnapshot();
 });
+
+test('ConsoleReporter.log is silent when isSilent is true', async () => {
+  const getConsoleBuff = build(ConsoleReporter, (data): MockData => data, null, {isSilent: true});
+  expect(
+    await getConsoleBuff(r => {
+      r.log('foobar');
+    }),
+  ).toMatchSnapshot();
+});
+
+test('ConsoleReporter.tree is silent when isSilent is true', async () => {
+  const getConsoleBuff = build(ConsoleReporter, (data): MockData => data, null, {isSilent: true});
+  const trees = [
+    {name: 'dep1'},
+    {
+      name: 'dep2',
+      children: [
+        {
+          name: 'dep2.1',
+          children: [{name: 'dep2.1.1'}, {name: 'dep2.1.2'}],
+        },
+        {
+          name: 'dep2.2',
+          children: [{name: 'dep2.2.1'}, {name: 'dep2.2.2'}],
+        },
+      ],
+    },
+    {
+      name: 'dep3',
+      children: [{name: 'dep3.1'}, {name: 'dep3.2'}],
+    },
+  ];
+  expect(
+    await getConsoleBuff(r => {
+      r.tree('', trees);
+    }),
+  ).toMatchSnapshot();
+});
+
+test('ConsoleReporter.auditSummary', async () => {
+  const auditMetadata = {
+    vulnerabilities: {
+      info: 0,
+      low: 0,
+      moderate: 0,
+      high: 1,
+      critical: 0,
+    },
+    dependencies: 5,
+    devDependencies: 0,
+    optionalDependencies: 0,
+    totalDependencies: 5,
+  };
+
+  expect(
+    await getConsoleBuff(r => {
+      r.auditSummary(auditMetadata);
+    }),
+  ).toMatchSnapshot();
+});

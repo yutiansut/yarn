@@ -1,16 +1,16 @@
 /* @flow */
 
-import type {ReporterSpinner} from '../reporters/types.js';
 import type Config from '../config.js';
 import {MessageError, ProcessTermError} from '../errors.js';
 import * as constants from '../constants.js';
 import * as child from './child.js';
-import {exists} from './fs.js';
+import * as fs from './fs.js';
+import {dynamicRequire} from './dynamic-require.js';
+import {makePortableProxyScript} from './portable-script.js';
 import {registries} from '../resolvers/index.js';
 import {fixCmdWinSlashes} from './fix-cmd-win-slashes.js';
 import {getBinFolder as getGlobalBinFolder, run as globalRun} from '../cli/commands/global.js';
 
-const invariant = require('invariant');
 const path = require('path');
 
 export type LifecycleReturn = Promise<{
@@ -19,14 +19,35 @@ export type LifecycleReturn = Promise<{
   stdout: string,
 }>;
 
-const IGNORE_MANIFEST_KEYS = ['readme'];
+export const IGNORE_MANIFEST_KEYS: Set<string> = new Set(['readme', 'notice', 'licenseText']);
 
 // We treat these configs as internal, thus not expose them to process.env.
 // This helps us avoid some gyp issues when building native modules.
 // See https://github.com/yarnpkg/yarn/issues/2286.
 const IGNORE_CONFIG_KEYS = ['lastUpdateCheck'];
 
-const INVALID_CHAR_REGEX = /[^a-zA-Z0-9_]/g;
+let wrappersFolder = null;
+
+export async function getWrappersFolder(config: Config): Promise<string> {
+  if (wrappersFolder) {
+    return wrappersFolder;
+  }
+
+  wrappersFolder = await fs.makeTempDir();
+
+  await makePortableProxyScript(process.execPath, wrappersFolder, {
+    proxyBasename: 'node',
+  });
+
+  await makePortableProxyScript(process.execPath, wrappersFolder, {
+    proxyBasename: 'yarn',
+    prependArguments: [process.argv[1]],
+  });
+
+  return wrappersFolder;
+}
+
+const INVALID_CHAR_REGEX = /\W/g;
 
 export async function makeEnv(
   stage: string,
@@ -37,6 +58,7 @@ export async function makeEnv(
 } {
   const env = {
     NODE: process.execPath,
+    INIT_CWD: process.cwd(),
     // This lets `process.env.NODE` to override our `process.execPath`.
     // This is a bit confusing but it is how `npm` was designed so we
     // try to be compatible with that.
@@ -51,7 +73,7 @@ export async function makeEnv(
 
   env.npm_lifecycle_event = stage;
   env.npm_node_execpath = env.NODE;
-  env.npm_execpath = env.npm_execpath || process.mainModule.filename;
+  env.npm_execpath = env.npm_execpath || (process.mainModule && process.mainModule.filename);
 
   // Set the env to production for npm compat if production mode.
   // https://github.com/npm/npm/blob/30d75e738b9cb7a6a3f9b50e971adcbe63458ed3/lib/utils/lifecycle.js#L336
@@ -77,16 +99,14 @@ export async function makeEnv(
     const queue = [['', manifest]];
     while (queue.length) {
       const [key, val] = queue.pop();
-      if (key[0] === '_') {
-        continue;
-      }
-
       if (typeof val === 'object') {
         for (const subKey in val) {
-          const completeKey = [key, subKey].filter((part: ?string): boolean => !!part).join('_');
-          queue.push([completeKey, val[subKey]]);
+          const fullKey = [key, subKey].filter(Boolean).join('_');
+          if (fullKey && fullKey[0] !== '_' && !IGNORE_MANIFEST_KEYS.has(fullKey)) {
+            queue.push([fullKey, val[subKey]]);
+          }
         }
-      } else if (IGNORE_MANIFEST_KEYS.indexOf(key) < 0) {
+      } else {
         let cleanVal = String(val);
         if (cleanVal.indexOf('\n') >= 0) {
           cleanVal = JSON.stringify(cleanVal);
@@ -145,6 +165,13 @@ export async function makeEnv(
   const envPath = env[constants.ENV_PATH_KEY];
   const pathParts = envPath ? envPath.split(path.delimiter) : [];
 
+  // Include the directory that contains node so that we can guarantee that the scripts
+  // will always run with the exact same Node release than the one use to run Yarn
+  const execBin = path.dirname(process.execPath);
+  if (pathParts.indexOf(execBin) === -1) {
+    pathParts.unshift(execBin);
+  }
+
   // Include node-gyp version that was bundled with the current Node.js version,
   // if available.
   pathParts.unshift(path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'node-gyp-bin'));
@@ -163,7 +190,7 @@ export async function makeEnv(
     pathParts.unshift(globalBin);
   }
 
-  // add .bin folders to PATH
+  // Add node_modules .bin folders to the PATH
   for (const registry of Object.keys(registries)) {
     const binFolder = path.join(config.registries[registry].folder, '.bin');
     if (config.workspacesEnabled && config.workspaceRootFolder) {
@@ -171,11 +198,35 @@ export async function makeEnv(
     }
     pathParts.unshift(path.join(config.linkFolder, binFolder));
     pathParts.unshift(path.join(cwd, binFolder));
+    if (config.modulesFolder) {
+      pathParts.unshift(path.join(config.modulesFolder, '.bin'));
+    }
   }
 
-  if (config.scriptsPrependNodePath) {
-    pathParts.unshift(path.join(path.dirname(process.execPath)));
+  const pnpFile = `${config.lockfileFolder}/${constants.PNP_FILENAME}`;
+  if (await fs.exists(pnpFile)) {
+    const pnpApi = dynamicRequire(pnpFile);
+
+    const packageLocator = pnpApi.findPackageLocator(`${config.cwd}/`);
+    const packageInformation = pnpApi.getPackageInformation(packageLocator);
+
+    for (const [name, reference] of packageInformation.packageDependencies.entries()) {
+      const dependencyInformation = pnpApi.getPackageInformation({name, reference});
+
+      if (!dependencyInformation || !dependencyInformation.packageLocation) {
+        continue;
+      }
+
+      pathParts.unshift(`${dependencyInformation.packageLocation}/.bin`);
+    }
+
+    // Note that NODE_OPTIONS doesn't support any style of quoting its arguments at the moment
+    // For this reason, it won't work if the user has a space inside its $PATH
+    env.NODE_OPTIONS = env.NODE_OPTIONS || '';
+    env.NODE_OPTIONS += ` --require ${pnpFile}`;
   }
+
+  pathParts.unshift(await getWrappersFolder(config));
 
   // join path back together
   env[constants.ENV_PATH_KEY] = pathParts.join(path.delimiter);
@@ -183,17 +234,23 @@ export async function makeEnv(
   return env;
 }
 
-export async function executeLifecycleScript(
+export async function executeLifecycleScript({
+  stage,
+  config,
+  cwd,
+  cmd,
+  isInteractive,
+  onProgress,
+  customShell,
+}: {
   stage: string,
   config: Config,
   cwd: string,
   cmd: string,
-  spinner?: ReporterSpinner,
+  isInteractive?: boolean,
+  onProgress?: (chunk: Buffer | string) => void,
   customShell?: string,
-): LifecycleReturn {
-  // if we don't have a spinner then pipe everything to the terminal
-  const stdio = spinner ? undefined : 'inherit';
-
+}): LifecycleReturn {
   const env = await makeEnv(stage, cwd, config);
 
   await checkForGypIfNeeded(config, cmd, env[constants.ENV_PATH_KEY].split(path.delimiter));
@@ -203,28 +260,18 @@ export async function executeLifecycleScript(
     cmd = fixCmdWinSlashes(cmd);
   }
 
-  let updateProgress;
-  if (spinner) {
-    updateProgress = data => {
-      const dataStr = data
-        .toString() // turn buffer into string
-        .trim(); // trim whitespace
+  // By default (non-interactive), pipe everything to the terminal and run child process detached
+  // as long as it's not Windows (since windows does not have /dev/tty)
+  let stdio = ['ignore', 'pipe', 'pipe'];
+  let detached = process.platform !== 'win32';
 
-      invariant(spinner && spinner.tick, 'We should have spinner and its ticker here');
-      if (dataStr) {
-        spinner.tick(
-          dataStr
-            // Only get the last line
-            .substr(dataStr.lastIndexOf('\n') + 1)
-            // change tabs to spaces as they can interfere with the console
-            .replace(/\t/g, ' '),
-        );
-      }
-    };
+  if (isInteractive) {
+    stdio = 'inherit';
+    detached = false;
   }
-  const stdout = customShell
-    ? await child.spawn(customShell, [cmd], {cwd, env, stdio, windowsVerbatimArguments: true}, updateProgress)
-    : await child.spawn(cmd, [], {cwd, env, stdio, shell: true}, updateProgress);
+
+  const shell = customShell || true;
+  const stdout = await child.spawn(cmd, [], {cwd, env, stdio, detached, shell}, onProgress);
 
   return {cwd, command: cmd, stdout};
 }
@@ -253,7 +300,7 @@ async function _checkForGyp(config: Config, paths: Array<string>): Promise<void>
   const {reporter} = config;
 
   // Check every directory in the PATH
-  const allChecks = await Promise.all(paths.map(dir => exists(path.join(dir, 'node-gyp'))));
+  const allChecks = await Promise.all(paths.map(dir => fs.exists(path.join(dir, 'node-gyp'))));
   if (allChecks.some(Boolean)) {
     // node-gyp is available somewhere
     return;
@@ -276,21 +323,29 @@ export async function execFromManifest(config: Config, commandName: string, cwd:
 
   const cmd: ?string = pkg.scripts[commandName];
   if (cmd) {
-    await execCommand(commandName, config, cmd, cwd);
+    await execCommand({stage: commandName, config, cmd, cwd, isInteractive: true});
   }
 }
 
-export async function execCommand(
+export async function execCommand({
+  stage,
+  config,
+  cmd,
+  cwd,
+  isInteractive,
+  customShell,
+}: {
   stage: string,
   config: Config,
   cmd: string,
   cwd: string,
+  isInteractive: boolean,
   customShell?: string,
-): Promise<void> {
+}): Promise<void> {
   const {reporter} = config;
   try {
     reporter.command(cmd);
-    await executeLifecycleScript(stage, config, cwd, cmd, undefined, customShell);
+    await executeLifecycleScript({stage, config, cwd, cmd, isInteractive, customShell});
     return Promise.resolve();
   } catch (err) {
     if (err instanceof ProcessTermError) {

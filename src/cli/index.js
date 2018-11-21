@@ -41,7 +41,7 @@ function findProjectRoot(base: string): string {
   return base;
 }
 
-export function main({
+export async function main({
   startArgs,
   args,
   endArgs,
@@ -49,16 +49,30 @@ export function main({
   startArgs: Array<string>,
   args: Array<string>,
   endArgs: Array<string>,
-}) {
+}): Promise<void> {
+  const collect = (val, acc) => {
+    acc.push(val);
+    return acc;
+  };
+
   loudRejection();
   handleSignals();
 
   // set global options
   commander.version(version, '-v, --version');
   commander.usage('[command] [flags]');
+  commander.option('--no-default-rc', 'prevent Yarn from automatically detecting yarnrc and npmrc files');
+  commander.option(
+    '--use-yarnrc <path>',
+    'specifies a yarnrc file that Yarn should use (.yarnrc only, not .npmrc)',
+    collect,
+    [],
+  );
   commander.option('--verbose', 'output verbose messages on internal operations');
   commander.option('--offline', 'trigger an error if any required dependencies are not available in local cache');
   commander.option('--prefer-offline', 'use network only if dependencies are not available in local cache');
+  commander.option('--enable-pnp, --pnp', "enable the Plug'n'Play installation");
+  commander.option('--disable-pnp', "disable the Plug'n'Play installation");
   commander.option('--strict-semver');
   commander.option('--json', 'format Yarn log messages as lines of JSON (see jsonlines.org)');
   commander.option('--ignore-scripts', "don't run lifecycle scripts");
@@ -86,7 +100,12 @@ export function main({
   commander.option('--preferred-cache-folder <path>', 'specify a custom folder to store the yarn cache if possible');
   commander.option('--cache-folder <path>', 'specify a custom folder that must be used to store the yarn cache');
   commander.option('--mutex <type>[:specifier]', 'use a mutex to ensure only one yarn instance is executing');
-  commander.option('--emoji [bool]', 'enable emoji in output', boolify, process.platform === 'darwin');
+  commander.option(
+    '--emoji [bool]',
+    'enable emoji in output',
+    boolify,
+    process.platform === 'darwin' || process.env.TERM_PROGRAM === 'Hyper' || process.env.TERM_PROGRAM === 'HyperTerm',
+  );
   commander.option('-s, --silent', 'skip Yarn console logs, other types of logs (script output) will be printed');
   commander.option('--cwd <cwd>', 'working directory to use', process.cwd());
   commander.option('--proxy <host>', '');
@@ -102,6 +121,8 @@ export function main({
     boolify,
   );
   commander.option('--no-node-version-check', 'do not warn when using a potentially unsupported Node version');
+  commander.option('--focus', 'Focus on a single workspace by installing remote copies of its sibling workspaces.');
+  commander.option('--otp <otpcode>', 'one-time password for two factor authentication');
 
   // if -v is the first command, then always exit after returning the version
   if (args[0] === '-v') {
@@ -168,18 +189,24 @@ export function main({
   const PROXY_COMMANDS = new Set([`run`, `create`, `node`]);
   if (PROXY_COMMANDS.has(commandName)) {
     if (endArgs.length === 0) {
+      let preservedArgs = 0;
       // the "run" and "create" command take one argument that we want to parse as usual (the
       // script/package name), hence the splice(1)
       if (command === commands.run || command === commands.create) {
-        endArgs = ['--', ...args.splice(1)];
-      } else {
-        endArgs = ['--', ...args];
+        preservedArgs += 1;
       }
+      // If the --into option immediately follows the command (or the script name in the "run/create"
+      // case), we parse them as regular options so that we can cd into them
+      if (args[preservedArgs] === `--into`) {
+        preservedArgs += 2;
+      }
+      endArgs = ['--', ...args.splice(preservedArgs)];
     } else {
       warnAboutRunDashDash = true;
     }
   }
 
+  commander.originalArgs = args;
   args = [...preCommandArgs, ...args];
 
   command.setFlags(commander);
@@ -470,11 +497,15 @@ export function main({
 
   const cwd = command.shouldRunInCurrentCwd ? commander.cwd : findProjectRoot(commander.cwd);
 
-  config
+  await config
     .init({
       cwd,
       commandName,
 
+      enablePnp: commander.pnp,
+      disablePnp: commander.disablePnp,
+      enableDefaultRc: commander.defaultRc,
+      extraneousYarnrcFiles: commander.useYarnrc,
       binLinks: commander.binLinks,
       modulesFolder: commander.modulesFolder,
       linkFolder: commander.linkFolder,
@@ -495,8 +526,9 @@ export function main({
       networkConcurrency: commander.networkConcurrency,
       networkTimeout: commander.networkTimeout,
       nonInteractive: commander.nonInteractive,
-      scriptsPrependNodePath: commander.scriptsPrependNodePath,
       updateChecksums: commander.updateChecksums,
+      focus: commander.focus,
+      otp: commander.otp,
     })
     .then(() => {
       // lockfile check must happen after config.init sets lockfileFolder
@@ -556,7 +588,7 @@ export function main({
 }
 
 async function start(): Promise<void> {
-  const rc = getRcConfigForCwd(process.cwd());
+  const rc = getRcConfigForCwd(process.cwd(), process.argv.slice(2));
   const yarnPath = rc['yarn-path'];
 
   if (yarnPath && !boolifyWithDefault(process.env.YARN_IGNORE_PATH, false)) {
@@ -582,7 +614,7 @@ async function start(): Promise<void> {
     const args = process.argv.slice(2, doubleDashIndex === -1 ? process.argv.length : doubleDashIndex);
     const endArgs = doubleDashIndex === -1 ? [] : process.argv.slice(doubleDashIndex);
 
-    main({startArgs, args, endArgs});
+    await main({startArgs, args, endArgs});
   }
 }
 
@@ -591,7 +623,10 @@ async function start(): Promise<void> {
 export const autoRun = module.children.length === 0;
 
 if (require.main === module) {
-  start();
+  start().catch(error => {
+    console.error(error.stack || error.message || error);
+    process.exitCode = 1;
+  });
 }
 
 export default start;

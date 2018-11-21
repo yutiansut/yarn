@@ -91,6 +91,11 @@ export function makeConfigFromDirectory(cwd: string, reporter: Reporter, flags: 
       prefix: flags.prefix,
       production: flags.production,
       updateChecksums: !!flags.updateChecksums,
+      offline: !!flags.offline,
+      nonInteractive: typeof flags.nonInteractive !== 'undefined' ? Boolean(flags.nonInteractive) : true,
+      focus: !!flags.focus,
+      enableDefaultRc: !flags.noDefaultRc,
+      extraneousYarnrcFiles: flags.useYarnrc,
     },
     reporter,
   );
@@ -181,6 +186,7 @@ export async function run<T, R>(
   } catch (err) {
     throw new Error(`${err && err.stack} \nConsole output:\n ${out}`);
   } finally {
+    reporter.close();
     await fs.unlink(cwd);
   }
 }

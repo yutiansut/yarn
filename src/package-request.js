@@ -78,7 +78,9 @@ export default class PackageRequest {
           type: preferredRemoteType,
           reference: resolvedParts.url,
           hash: resolvedParts.hash,
+          integrity: shrunk.integrity,
           registry: shrunk.registry,
+          packageName: shrunk.name,
         },
         optionalDependencies: shrunk.optionalDependencies || {},
         dependencies: shrunk.dependencies || {},
@@ -181,14 +183,26 @@ export default class PackageRequest {
    * the registry.
    */
 
-  findVersionInfo(): Promise<Manifest> {
+  async findVersionInfo(): Promise<Manifest> {
     const exoticResolver = getExoticResolver(this.pattern);
     if (exoticResolver) {
       return this.findExoticVersionInfo(exoticResolver, this.pattern);
     } else if (WorkspaceResolver.isWorkspace(this.pattern, this.resolver.workspaceLayout)) {
       invariant(this.resolver.workspaceLayout, 'expected workspaceLayout');
       const resolver = new WorkspaceResolver(this, this.pattern, this.resolver.workspaceLayout);
-      return resolver.resolve();
+      let manifest;
+      if (
+        this.config.focus &&
+        !this.pattern.includes(this.resolver.workspaceLayout.virtualManifestName) &&
+        !this.pattern.startsWith(this.config.focusedWorkspaceName + '@')
+      ) {
+        const localInfo = this.resolver.workspaceLayout.getManifestByPattern(this.pattern);
+        invariant(localInfo, 'expected local info for ' + this.pattern);
+        const localManifest = localInfo.manifest;
+        const requestPattern = localManifest.name + '@' + localManifest.version;
+        manifest = await this.findVersionOnRegistry(requestPattern);
+      }
+      return resolver.resolve(manifest);
     } else {
       return this.findVersionOnRegistry(this.pattern);
     }
@@ -247,7 +261,7 @@ export default class PackageRequest {
     }
 
     if (info.flat && !this.resolver.flat) {
-      throw new MessageError(this.reporter.lang('flatGlobalError'));
+      throw new MessageError(this.reporter.lang('flatGlobalError', `${info.name}@${info.version}`));
     }
 
     // validate version info
@@ -376,8 +390,11 @@ export default class PackageRequest {
 
     // filter the list down to just the packages requested.
     // prevents us from having to query the metadata for all packages.
-    if (filterByPatterns && filterByPatterns.length) {
-      const filterByNames = filterByPatterns.map(pattern => normalizePattern(pattern).name);
+    if ((filterByPatterns && filterByPatterns.length) || (flags && flags.pattern)) {
+      const filterByNames =
+        filterByPatterns && filterByPatterns.length
+          ? filterByPatterns.map(pattern => normalizePattern(pattern).name)
+          : [];
       depReqPatterns = depReqPatterns.filter(
         dep =>
           filterByNames.indexOf(normalizePattern(dep.pattern).name) >= 0 ||

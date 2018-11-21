@@ -6,6 +6,11 @@ import NpmRegistry from '../../src/registries/npm-registry.js';
 import {BufferReporter} from '../../src/reporters/index.js';
 import homeDir, {home} from '../../src/util/user-home-dir.js';
 
+function basicAuth(username, password): string {
+  const pw = Buffer.from(String(password), 'base64').toString();
+  return Buffer.from(String(username) + ':' + pw).toString('base64');
+}
+
 describe('normalizeConfig', () => {
   beforeAll(() => {
     process.env.REPLACE = 'REPLACED';
@@ -77,9 +82,13 @@ describe('request', () => {
   function createRegistry(config: Object): Object {
     const testCwd = '.';
     const {mockRequestManager, mockRegistries, mockReporter} = createMocks();
-    const npmRegistry = new NpmRegistry(testCwd, mockRegistries, mockRequestManager, mockReporter);
+    const npmRegistry = new NpmRegistry(testCwd, mockRegistries, mockRequestManager, mockReporter, true, []);
     npmRegistry.config = config;
     return {
+      setOtp(otp: string) {
+        npmRegistry.setOtp(otp);
+      },
+
       request(url: string, options: Object, packageName: string): Object {
         npmRegistry.request(url, options, packageName);
         const lastIndex = mockRequestManager.request.mock.calls.length - 1;
@@ -94,6 +103,17 @@ describe('request', () => {
     const config = {};
     const requestParams = createRegistry(config).request(url);
     expect(requestParams.url).toBe(url);
+  });
+
+  test('should add `npm-otp` header', () => {
+    const url = 'https://registry.npmjs.org/yarn';
+    const config = {};
+    const registry = createRegistry(config);
+
+    registry.setOtp('123 456');
+
+    const requestParams = registry.request(url);
+    expect(requestParams.headers['npm-otp']).toBe('123 456');
   });
 
   const testCases = [
@@ -554,6 +574,46 @@ describe('request', () => {
         },
       ],
     },
+    {
+      title: 'using username/password config for registries where pathnames play a role',
+      config: {
+        '@private:registry': 'https://registry.myorg.com/api/npm/registry/',
+        '//registry.myorg.com/api/npm/registry/:username': 'scopedPrivateUsername',
+        '//registry.myorg.com/api/npm/registry/:_password': 'scopedPrivatePassword',
+        '//registry.myorg.com/api/packages/:username': 'scopedPrivateUsername',
+        '//registry.myorg.com/api/packages/:_password': 'scopedPrivatePassword',
+      },
+      requests: [
+        {
+          url: '@private/pkg',
+          pkg: '@private/pkg',
+          expect: {
+            root: 'https://registry.myorg.com/api/npm/registry/',
+            auth: basicAuth('scopedPrivateUsername', 'scopedPrivatePassword'),
+            basicAuth: true,
+          },
+        },
+        {
+          url: 'https://some.cdn.com/some-hash/@private-pkg-1.0.0.tar.gz',
+          pkg: '@private/pkg',
+          expect: {root: 'https://some.cdn.com', auth: false},
+        },
+        {
+          url: 'https://some.cdn.com/@private/pkg',
+          pkg: null,
+          expect: {root: 'https://some.cdn.com', auth: false},
+        },
+        {
+          url: 'https://registry.myorg.com/api/packages/private---pkg.tar.gz',
+          pkg: '@private/pkg',
+          expect: {
+            root: 'https://registry.myorg.com/api/packages/',
+            auth: basicAuth('scopedPrivateUsername', 'scopedPrivatePassword'),
+            basicAuth: true,
+          },
+        },
+      ],
+    },
   ];
 
   testCases.forEach(testCase => {
@@ -566,7 +626,11 @@ describe('request', () => {
         (req.skip ? it.skip : req.only ? it.only : it)(desc, () => {
           const requestParams = registry.request(req.url, {}, req.pkg);
           expect(requestParams.url.substr(0, req.expect.root.length)).toBe(req.expect.root);
-          expect(requestParams.headers.authorization).toBe(req.expect.auth ? `Bearer ${req.expect.auth}` : undefined);
+          if (req.expect.basicAuth) {
+            expect(requestParams.headers.authorization).toBe(req.expect.auth ? `Basic ${req.expect.auth}` : undefined);
+          } else {
+            expect(requestParams.headers.authorization).toBe(req.expect.auth ? `Bearer ${req.expect.auth}` : undefined);
+          }
         });
       });
     });
@@ -577,7 +641,7 @@ describe('isRequestToRegistry functional test', () => {
   test('request to registry url matching', () => {
     const testCwd = '.';
     const {mockRequestManager, mockRegistries, mockReporter} = createMocks();
-    const npmRegistry = new NpmRegistry(testCwd, mockRegistries, mockRequestManager, mockReporter);
+    const npmRegistry = new NpmRegistry(testCwd, mockRegistries, mockRequestManager, mockReporter, true, []);
 
     const validRegistryUrls = [
       ['http://foo.bar:80/foo/bar/baz', 'http://foo.bar/foo/'],
@@ -609,7 +673,7 @@ describe('isRequestToRegistry functional test', () => {
   test('isRequestToRegistry with custom host prefix', () => {
     const testCwd = '.';
     const {mockRequestManager, mockRegistries, mockReporter} = createMocks();
-    const npmRegistry = new NpmRegistry(testCwd, mockRegistries, mockRequestManager, mockReporter);
+    const npmRegistry = new NpmRegistry(testCwd, mockRegistries, mockRequestManager, mockReporter, true, []);
 
     npmRegistry.config = {
       'custom-host-suffix': 'some.host.org',
@@ -659,7 +723,7 @@ describe('isScopedPackage functional test', () => {
   test('identifies scope correctly', () => {
     const testCwd = '.';
     const {mockRequestManager, mockRegistries, mockReporter} = createMocks();
-    const npmRegistry = new NpmRegistry(testCwd, mockRegistries, mockRequestManager, mockReporter);
+    const npmRegistry = new NpmRegistry(testCwd, mockRegistries, mockRequestManager, mockReporter, true, []);
 
     packageIdents.forEach(([pathname, scope]) => {
       expect(npmRegistry.isScopedPackage(pathname)).toEqual(!!scope.length);
@@ -671,7 +735,7 @@ describe('getRequestUrl functional test', () => {
   test('returns pathname when it is a full URL', () => {
     const testCwd = '.';
     const {mockRequestManager, mockRegistries, mockReporter} = createMocks();
-    const npmRegistry = new NpmRegistry(testCwd, mockRegistries, mockRequestManager, mockReporter);
+    const npmRegistry = new NpmRegistry(testCwd, mockRegistries, mockRequestManager, mockReporter, true, []);
     const fullURL = 'HTTP://xn--xample-hva.com:80/foo/bar/baz';
 
     expect(npmRegistry.getRequestUrl('https://my.registry.co', fullURL)).toEqual(fullURL);
@@ -680,7 +744,7 @@ describe('getRequestUrl functional test', () => {
   test('correctly handles registries lacking a trailing slash', () => {
     const testCwd = '.';
     const {mockRequestManager, mockRegistries, mockReporter} = createMocks();
-    const npmRegistry = new NpmRegistry(testCwd, mockRegistries, mockRequestManager, mockReporter);
+    const npmRegistry = new NpmRegistry(testCwd, mockRegistries, mockRequestManager, mockReporter, true, []);
     const registry = 'https://my.registry.co/registry';
     const pathname = 'foo/bar/baz';
 
@@ -692,7 +756,7 @@ describe('getScope functional test', () => {
   describe('matches scope correctly', () => {
     const testCwd = '.';
     const {mockRequestManager, mockRegistries, mockReporter} = createMocks();
-    const npmRegistry = new NpmRegistry(testCwd, mockRegistries, mockRequestManager, mockReporter);
+    const npmRegistry = new NpmRegistry(testCwd, mockRegistries, mockRequestManager, mockReporter, true, []);
 
     packageIdents.forEach(([pathname, scope]) => {
       expect(npmRegistry.getScope(pathname)).toEqual(scope);
@@ -705,7 +769,7 @@ describe('getPossibleConfigLocations', () => {
     const testCwd = './project/subdirectory';
     const {mockRequestManager, mockRegistries} = createMocks();
     const reporter = new BufferReporter({verbose: true});
-    const npmRegistry = new NpmRegistry(testCwd, mockRegistries, mockRequestManager, reporter);
+    const npmRegistry = new NpmRegistry(testCwd, mockRegistries, mockRequestManager, reporter, true, []);
     await npmRegistry.getPossibleConfigLocations('npmrc', reporter);
 
     const logs = reporter.getBuffer().map(logItem => logItem.data);
@@ -730,7 +794,7 @@ describe('checkOutdated functional test', () => {
   test('homepage URL from top level', async () => {
     const testCwd = '.';
     const {mockRequestManager, mockRegistries, mockReporter} = createMocks();
-    const npmRegistry = new NpmRegistry(testCwd, mockRegistries, mockRequestManager, mockReporter);
+    const npmRegistry = new NpmRegistry(testCwd, mockRegistries, mockRequestManager, mockReporter, true, []);
 
     mockRequestManager.request = () => {
       return {
@@ -758,7 +822,7 @@ describe('checkOutdated functional test', () => {
   test('homepage URL fallback to wanted package manifest', async () => {
     const testCwd = '.';
     const {mockRequestManager, mockRegistries, mockReporter} = createMocks();
-    const npmRegistry = new NpmRegistry(testCwd, mockRegistries, mockRequestManager, mockReporter);
+    const npmRegistry = new NpmRegistry(testCwd, mockRegistries, mockRequestManager, mockReporter, true, []);
 
     mockRequestManager.request = () => {
       return {
@@ -786,7 +850,7 @@ describe('checkOutdated functional test', () => {
   test('repository URL from top level', async () => {
     const testCwd = '.';
     const {mockRequestManager, mockRegistries, mockReporter} = createMocks();
-    const npmRegistry = new NpmRegistry(testCwd, mockRegistries, mockRequestManager, mockReporter);
+    const npmRegistry = new NpmRegistry(testCwd, mockRegistries, mockRequestManager, mockReporter, true, []);
 
     mockRequestManager.request = () => {
       return {
@@ -816,7 +880,7 @@ describe('checkOutdated functional test', () => {
   test('repository URL fallback to wanted package manifest', async () => {
     const testCwd = '.';
     const {mockRequestManager, mockRegistries, mockReporter} = createMocks();
-    const npmRegistry = new NpmRegistry(testCwd, mockRegistries, mockRequestManager, mockReporter);
+    const npmRegistry = new NpmRegistry(testCwd, mockRegistries, mockRequestManager, mockReporter, true, []);
 
     mockRequestManager.request = () => {
       return {
@@ -846,7 +910,7 @@ describe('checkOutdated functional test', () => {
   test('unpublished package (no versions)', async () => {
     const testCwd = '.';
     const {mockRequestManager, mockRegistries, mockReporter} = createMocks();
-    const npmRegistry = new NpmRegistry(testCwd, mockRegistries, mockRequestManager, mockReporter);
+    const npmRegistry = new NpmRegistry(testCwd, mockRegistries, mockRequestManager, mockReporter, true, []);
 
     mockRequestManager.request = () => {
       return {
@@ -865,5 +929,52 @@ describe('checkOutdated functional test', () => {
     }
 
     expect(message).toEqual(expect.stringContaining('No valid versions'));
+  });
+
+  test('latest version fallback to wanted package manifest', async () => {
+    const testCwd = '.';
+    const {mockRequestManager, mockRegistries, mockReporter} = createMocks();
+    const npmRegistry = new NpmRegistry(testCwd, mockRegistries, mockRequestManager, mockReporter, true, []);
+
+    mockRequestManager.request = () => {
+      return {
+        'dist-tags': {},
+        versions: {
+          '2.0.0': {
+            version: '2.0.0',
+            repository: {
+              url: 'http://package.repo.com',
+            },
+          },
+        },
+      };
+    };
+
+    const result = await npmRegistry.checkOutdated(mockConfig, 'left-pad', '2.0.0');
+
+    expect(result).toMatchObject({
+      latest: '2.0.0',
+      wanted: '2.0.0',
+      url: 'http://package.repo.com',
+    });
+  });
+
+  test('package with an empty response', async () => {
+    const testCwd = '.';
+    const {mockRequestManager, mockRegistries, mockReporter} = createMocks();
+    const npmRegistry = new NpmRegistry(testCwd, mockRegistries, mockRequestManager, mockReporter, true, []);
+
+    mockRequestManager.request = () => {
+      return {};
+    };
+
+    let message;
+    try {
+      await npmRegistry.checkOutdated(mockConfig, 'left-pad', '2.0.0');
+    } catch (err) {
+      message = err.message;
+    }
+
+    expect(message).toEqual(expect.stringContaining('malformed response from registry for "left-pad"'));
   });
 });

@@ -53,6 +53,36 @@ test.concurrent(
   },
 );
 
+test.concurrent(
+  'install with offline mirror and pack-built-packages setting should not ignore ".npmignore"',
+  (): Promise<void> => {
+    return runInstall({ignoreScripts: true}, 'install-offline-built-artifacts-no-ignores', async (config, reporter) => {
+      // install scripts were not run
+      expect(await fs.exists(path.join(config.cwd, 'node_modules', 'dep-a', 'build', 'build-artifact.so'))).toEqual(
+        false,
+      );
+
+      // enable packing of built artifacts
+      config.packBuiltPackages = true;
+
+      // after first run we observe package side effects
+      let reinstall = new Install({force: true}, config, reporter, await Lockfile.fromDirectory(config.cwd));
+      await reinstall.init();
+      expect(await fs.exists(path.join(config.cwd, 'node_modules', 'dep-a', 'build', 'module-a-build.log'))).toEqual(
+        true,
+      );
+
+      // after second run we observe only package side effects because offline mirror was used
+      await fs.unlink(path.join(config.cwd, 'node_modules'));
+      reinstall = new Install({}, config, reporter, await Lockfile.fromDirectory(config.cwd));
+      await reinstall.init();
+      expect(await fs.exists(path.join(config.cwd, 'node_modules', 'dep-a', 'build', 'module-a-build.log'))).toEqual(
+        true,
+      );
+    });
+  },
+);
+
 test.concurrent('install without pack-built-packages should keep running install scripts', (): Promise<void> => {
   return runInstall({ignoreScripts: true}, 'install-offline-built-artifacts', async (config, reporter) => {
     // install scripts were not run
@@ -201,9 +231,9 @@ test.concurrent('install should add missing deps to yarn and mirror (PR import s
 
     const lockFileContent = await fs.readFile(path.join(config.cwd, 'yarn.lock'));
     const lockFileLines = explodeLockfile(lockFileContent);
-    expect(lockFileLines).toHaveLength(11);
-    expect(lockFileLines[3].indexOf('mime-db@')).toEqual(0);
-    expect(lockFileLines[6].indexOf('mime-types@2.0.0')).toEqual(0);
+    expect(lockFileLines).toHaveLength(14);
+    expect(lockFileLines[4].indexOf('mime-db@')).toEqual(0);
+    expect(lockFileLines[8].indexOf('mime-types@2.0.0')).toEqual(0);
   });
 });
 
@@ -232,8 +262,8 @@ test.concurrent('install should update a dependency to yarn and mirror (PR impor
     expect(lockFileLines[0]).toEqual('mime-db@~1.23.0:');
     expect(lockFileLines[2]).toMatch(/resolved "https:\/\/registry\.yarnpkg\.com\/mime-db\/-\/mime-db-/);
 
-    expect(lockFileLines[3]).toEqual('mime-types@2.1.11:');
-    expect(lockFileLines[5]).toMatch(
+    expect(lockFileLines[4]).toEqual('mime-types@2.1.11:');
+    expect(lockFileLines[6]).toMatch(
       /resolved "https:\/\/registry\.yarnpkg\.com\/mime-types\/-\/mime-types-2\.1\.11\.tgz#[a-f0-9]+"/,
     );
 

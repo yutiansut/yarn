@@ -6,6 +6,7 @@ import type {Manifest, PackageRemote, WorkspacesManifestMap, WorkspacesConfig} f
 import type PackageReference from './package-reference.js';
 import {execFromManifest} from './util/execute-lifecycle-script.js';
 import {resolveWithHome} from './util/path.js';
+import {boolifyWithDefault} from './util/conversion.js';
 import normalizeManifest from './util/normalize-manifest/index.js';
 import {MessageError} from './errors.js';
 import * as fs from './util/fs.js';
@@ -47,7 +48,13 @@ export type ConfigOptions = {
   childConcurrency?: number,
   networkTimeout?: number,
   nonInteractive?: boolean,
+  enablePnp?: boolean,
+  disablePnp?: boolean,
   scriptsPrependNodePath?: boolean,
+  offlineCacheFolder?: string,
+
+  enableDefaultRc?: boolean,
+  extraneousYarnrcFiles?: Array<string>,
 
   // Loosely compare semver for invalid cases like "0.01.0"
   looseSemver?: ?boolean,
@@ -59,6 +66,10 @@ export type ConfigOptions = {
   registry?: ?string,
 
   updateChecksums?: boolean,
+
+  focus?: boolean,
+
+  otp?: string,
 };
 
 type PackageMetadata = {
@@ -69,7 +80,7 @@ type PackageMetadata = {
   package: Manifest,
 };
 
-type RootManifests = {
+export type RootManifests = {
   [registryName: RegistryNames]: {
     loc: string,
     indent: ?string,
@@ -93,6 +104,10 @@ export default class Config {
     this.reporter = reporter;
     this._init({});
   }
+
+  //
+  enableDefaultRc: boolean;
+  extraneousYarnrcFiles: Array<string>;
 
   //
   looseSemver: boolean;
@@ -158,8 +173,19 @@ export default class Config {
 
   nonInteractive: boolean;
 
+  plugnplayPersist: boolean;
+  plugnplayEnabled: boolean;
+  plugnplayShebang: ?string;
+  plugnplayBlacklist: ?string;
+  plugnplayUnplugged: Array<string>;
+  plugnplayPurgeUnpluggedPackages: boolean;
+
+  scriptsPrependNodePath: boolean;
+
   workspacesEnabled: boolean;
   workspacesNohoistEnabled: boolean;
+
+  offlineCacheFolder: ?string;
 
   //
   cwd: string;
@@ -177,6 +203,13 @@ export default class Config {
 
   //
   commandName: string;
+
+  focus: boolean;
+  focusedWorkspaceName: string;
+
+  autoAddIntegrity: boolean;
+
+  otp: ?string;
 
   /**
    * Execute a promise produced by factory if it doesn't exist in our cache with
@@ -227,6 +260,16 @@ export default class Config {
     this.workspaceRootFolder = await this.findWorkspaceRoot(this.cwd);
     this.lockfileFolder = this.workspaceRootFolder || this.cwd;
 
+    // using focus in a workspace root is not allowed
+    if (this.focus && (!this.workspaceRootFolder || this.cwd === this.workspaceRootFolder)) {
+      throw new MessageError(this.reporter.lang('workspacesFocusRootCheck'));
+    }
+
+    if (this.focus) {
+      const focusedWorkspaceManifest = await this.readRootManifest();
+      this.focusedWorkspaceName = focusedWorkspaceManifest.name;
+    }
+
     this.linkedModules = [];
 
     let linkedModules;
@@ -255,18 +298,33 @@ export default class Config {
     for (const key of Object.keys(registries)) {
       const Registry = registries[key];
 
+      const extraneousRcFiles = Registry === registries.yarn ? this.extraneousYarnrcFiles : [];
+
       // instantiate registry
-      const registry = new Registry(this.cwd, this.registries, this.requestManager, this.reporter);
+      const registry = new Registry(
+        this.cwd,
+        this.registries,
+        this.requestManager,
+        this.reporter,
+        this.enableDefaultRc,
+        extraneousRcFiles,
+      );
       await registry.init({
         registry: opts.registry,
       });
 
       this.registries[key] = registry;
-      this.registryFolders.push(registry.folder);
+      if (this.registryFolders.indexOf(registry.folder) === -1) {
+        this.registryFolders.push(registry.folder);
+      }
       const rootModuleFolder = path.join(this.cwd, registry.folder);
-      if (this.rootModuleFolders.indexOf(rootModuleFolder) < 0) {
+      if (this.rootModuleFolders.indexOf(rootModuleFolder) === -1) {
         this.rootModuleFolders.push(rootModuleFolder);
       }
+    }
+
+    if (this.modulesFolder) {
+      this.registryFolders.push(this.modulesFolder);
     }
 
     this.networkConcurrency =
@@ -324,14 +382,52 @@ export default class Config {
     } else {
       this._cacheRootFolder = String(cacheRootFolder);
     }
+
+    const manifest = await this.maybeReadManifest(this.cwd);
+
+    const plugnplayByEnv = this.getOption('plugnplay-override');
+    if (plugnplayByEnv != null) {
+      this.plugnplayEnabled = plugnplayByEnv !== 'false' && plugnplayByEnv !== '0';
+      this.plugnplayPersist = false;
+    } else if (opts.enablePnp || opts.disablePnp) {
+      this.plugnplayEnabled = !!opts.enablePnp;
+      this.plugnplayPersist = true;
+    } else if (manifest && manifest.installConfig && manifest.installConfig.pnp) {
+      this.plugnplayEnabled = !!manifest.installConfig.pnp;
+      this.plugnplayPersist = false;
+    } else {
+      this.plugnplayEnabled = false;
+      this.plugnplayEnabled = false;
+    }
+
+    if (process.platform === 'win32') {
+      const cacheRootFolderDrive = path.parse(this._cacheRootFolder).root;
+      const lockfileFolderDrive = path.parse(this.lockfileFolder).root;
+
+      if (cacheRootFolderDrive !== lockfileFolderDrive) {
+        if (this.plugnplayEnabled) {
+          this.reporter.warn(this.reporter.lang('plugnplayWindowsSupport'));
+        }
+        this.plugnplayEnabled = false;
+        this.plugnplayPersist = false;
+      }
+    }
+
+    this.plugnplayShebang = String(this.getOption('plugnplay-shebang') || '') || '/usr/bin/env node';
+    this.plugnplayBlacklist = String(this.getOption('plugnplay-blacklist') || '') || null;
+
     this.workspacesEnabled = this.getOption('workspaces-experimental') !== false;
     this.workspacesNohoistEnabled = this.getOption('workspaces-nohoist-experimental') !== false;
+
+    this.offlineCacheFolder = String(this.getOption('offline-cache-folder') || '') || null;
 
     this.pruneOfflineMirror = Boolean(this.getOption('yarn-offline-mirror-pruning'));
     this.enableMetaFolder = Boolean(this.getOption('enable-meta-folder'));
     this.enableLockfileVersions = Boolean(this.getOption('yarn-enable-lockfile-versions'));
     this.linkFileDependencies = Boolean(this.getOption('yarn-link-file-dependencies'));
     this.packBuiltPackages = Boolean(this.getOption('experimental-pack-script-packages-in-mirror'));
+
+    this.autoAddIntegrity = !boolifyWithDefault(String(this.getOption('unsafe-disable-integrity-migration')), true);
 
     //init & create cacheFolder, tempFolder
     this.cacheFolder = path.join(this._cacheRootFolder, 'v' + String(constants.CACHE_VERSION));
@@ -369,6 +465,9 @@ export default class Config {
 
     this.commandName = opts.commandName || '';
 
+    this.enableDefaultRc = opts.enableDefaultRc !== false;
+    this.extraneousYarnrcFiles = opts.extraneousYarnrcFiles || [];
+
     this.preferOffline = !!opts.preferOffline;
     this.modulesFolder = opts.modulesFolder;
     this.globalFolder = opts.globalFolder || constants.GLOBAL_MODULE_DIRECTORY;
@@ -376,6 +475,8 @@ export default class Config {
     this.offline = !!opts.offline;
     this.binLinks = !!opts.binLinks;
     this.updateChecksums = !!opts.updateChecksums;
+    this.plugnplayUnplugged = [];
+    this.plugnplayPurgeUnpluggedPackages = false;
 
     this.ignorePlatform = !!opts.ignorePlatform;
     this.ignoreScripts = !!opts.ignoreScripts;
@@ -385,6 +486,8 @@ export default class Config {
     // $FlowFixMe$
     this.nonInteractive = !!opts.nonInteractive || isCi || !process.stdout.isTTY;
 
+    this.scriptsPrependNodePath = !!opts.scriptsPrependNodePath;
+
     this.requestManager.setOptions({
       offline: !!opts.offline && !opts.preferOffline,
       captureHar: !!opts.captureHar,
@@ -393,35 +496,91 @@ export default class Config {
     if (this.modulesFolder) {
       this.rootModuleFolders.push(this.modulesFolder);
     }
+
+    this.focus = !!opts.focus;
+    this.focusedWorkspaceName = '';
+
+    this.otp = opts.otp || '';
+  }
+
+  /**
+   * Generate a name suitable as unique filesystem identifier for the specified package.
+   */
+
+  generateUniquePackageSlug(pkg: PackageReference): string {
+    let slug = pkg.name;
+
+    slug = slug.replace(/[^@a-z0-9]+/g, '-');
+    slug = slug.replace(/^-+|-+$/g, '');
+
+    if (pkg.registry) {
+      slug = `${pkg.registry}-${slug}`;
+    } else {
+      slug = `unknown-${slug}`;
+    }
+
+    const {hash} = pkg.remote;
+
+    if (pkg.version) {
+      slug += `-${pkg.version}`;
+    }
+
+    if (pkg.uid && pkg.version !== pkg.uid) {
+      slug += `-${pkg.uid}`;
+    } else if (hash) {
+      slug += `-${hash}`;
+    }
+
+    return slug;
   }
 
   /**
    * Generate an absolute module path.
    */
 
-  generateHardModulePath(pkg: ?PackageReference, ignoreLocation?: ?boolean): string {
+  generateModuleCachePath(pkg: ?PackageReference): string {
     invariant(this.cacheFolder, 'No package root');
     invariant(pkg, 'Undefined package');
 
-    if (pkg.location && !ignoreLocation) {
-      return pkg.location;
+    const slug = this.generateUniquePackageSlug(pkg);
+    return path.join(this.cacheFolder, slug, 'node_modules', pkg.name);
+  }
+
+  /**
+   */
+
+  getUnpluggedPath(): string {
+    return path.join(this.lockfileFolder, '.pnp', 'unplugged');
+  }
+
+  /**
+    */
+
+  generatePackageUnpluggedPath(pkg: PackageReference): string {
+    const slug = this.generateUniquePackageSlug(pkg);
+    return path.join(this.getUnpluggedPath(), slug, 'node_modules', pkg.name);
+  }
+
+  /**
+   */
+
+  async listUnpluggedPackageFolders(): Promise<Map<string, string>> {
+    const unpluggedPackages = new Map();
+    const unpluggedPath = this.getUnpluggedPath();
+
+    if (!await fs.exists(unpluggedPath)) {
+      return unpluggedPackages;
     }
 
-    let name = pkg.name;
-    let uid = pkg.uid;
-    if (pkg.registry) {
-      name = `${pkg.registry}-${name}`;
+    for (const unpluggedName of await fs.readdir(unpluggedPath)) {
+      const nmListing = await fs.readdir(path.join(unpluggedPath, unpluggedName, 'node_modules'));
+      invariant(nmListing.length === 1, 'A single folder should be in the unplugged directory');
+
+      const target = path.join(unpluggedPath, unpluggedName, `node_modules`, nmListing[0]);
+      unpluggedPackages.set(unpluggedName, target);
     }
 
-    const {hash} = pkg.remote;
-
-    if (pkg.version && pkg.version !== pkg.uid) {
-      uid = `${pkg.version}-${uid}`;
-    } else if (hash) {
-      uid += `-${hash}`;
-    }
-
-    return path.join(this.cacheFolder, `${name}-${uid}`);
+    return unpluggedPackages;
   }
 
   /**
@@ -660,7 +819,8 @@ export default class Config {
       .map(registryName => this.registries[registryName].constructor.filename)
       .join('|');
     const trailingPattern = `/+(${registryFilenames})`;
-    const ignorePatterns = this.registryFolders.map(folder => `/${folder}/*/+(${registryFilenames})`);
+    // anything under folder (node_modules) should be ignored, thus use the '**' instead of shallow match "*"
+    const ignorePatterns = this.registryFolders.map(folder => `/${folder}/**/+(${registryFilenames})`);
 
     const files = await Promise.all(
       patterns.map(pattern =>
